@@ -1650,6 +1650,11 @@ template <typename T, typename U>
 void constructor_pullback(ValueAndPushforward<T, U> rhs,
                           ValueAndPushforward<T, U>* d_this,
                           ValueAndPushforward<T, U>* d_rhs) {
+  // Both members carry adjoints: in reverse-over-forward compositions
+  // (e.g. hessians) the primal `value` of a pushforward result feeds the
+  // outer derivative just like `pushforward` does. Dropping the value
+  // adjoint silently zeroes all second derivatives.
+  d_rhs->value += d_this->value;
   d_rhs->pushforward += d_this->pushforward;
 }
 } // namespace class_functions

@@ -336,15 +336,24 @@ ReverseModeForwPassVisitor::DifferentiateVarDecl(const clang::VarDecl* VD,
   StmtDiff initDiff;
   if (const Expr* init = VD->getInit())
     initDiff = Visit(init);
+  QualType AdjointType = DerivedType;
   // Adjoints should always be initialized
   if (!initDiff.getExpr_dx()) {
-    Expr* zero = getZeroInit(DerivedType);
+    // A reference cannot be zero-initialized. This happens when the
+    // initializer of a reference-typed declaration has no adjoint (for
+    // example, it refers to a global without a registered adjoint). Fall
+    // back to a value-typed zero adjoint, consistent with treating the
+    // referenced storage as non-differentiated.
+    if (AdjointType->isReferenceType())
+      AdjointType =
+          utils::getNonConstType(AdjointType.getNonReferenceType(), m_Sema);
+    Expr* zero = getZeroInit(AdjointType);
     initDiff.updateStmtDx(zero);
   }
   auto* VDCloned = BuildGlobalVarDecl(DerivedType, VD->getNameAsString(),
                                       initDiff.getExpr(), VD->isDirectInit());
   auto* VDDerived =
-      BuildGlobalVarDecl(DerivedType, "_d_" + VD->getNameAsString(),
+      BuildGlobalVarDecl(AdjointType, "_d_" + VD->getNameAsString(),
                          initDiff.getExpr_dx(), VD->isDirectInit());
   m_Variables.emplace(VDCloned, AdjointInfo{VDDerived});
   // Register the primal clone unconditionally so references rebind by map
