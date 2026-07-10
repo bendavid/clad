@@ -200,6 +200,15 @@ bool TBRAnalyzer::TraverseDeclStmt(DeclStmt* DS) {
   for (auto* D : DS->decls()) {
     if (auto* VD = dyn_cast<VarDecl>(D)) {
       if (VarData* data = getVarDataFromDecl(VD)) {
+        // A redeclaration is seen when the analysis passes over a loop body
+        // again: in the reverse pass the declaration is promoted to function
+        // scope, so all iterations share storage. If the declaration has no
+        // initializer, nothing is overwritten here and there is no store at
+        // this location to transfer responsibility to; keep the previous
+        // iteration's VarData (and in particular its required flags) so that
+        // subsequent writers of the variable record the overwritten value.
+        if (!VD->getInit())
+          continue;
         if (findReq(*data))
           markLocation(DS);
       }
