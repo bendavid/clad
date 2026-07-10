@@ -1513,8 +1513,15 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
           // On the start of computing every derivative, we have to reset the
           // global adjoint to zero in case it was used by another gradient.
           if (m_DiffReq.Mode == DiffMode::reverse) {
-            Expr* assignToZero = BuildOp(BO_Assign, Clone(foundExpr),
-                                         getZeroInit(foundExpr->getType()));
+            Stmt* assignToZero = nullptr;
+            // Array types are not assignable; use clad::zero_init instead.
+            if (foundExpr->getType()->isArrayType()) {
+              Expr* clonedRef = Clone(foundExpr);
+              assignToZero = GetCladZeroInit(clonedRef);
+            } else {
+              assignToZero = BuildOp(BO_Assign, Clone(foundExpr),
+                                     getZeroInit(foundExpr->getType()));
+            }
             addToBlock(assignToZero, m_Globals);
           }
         } else
@@ -2372,6 +2379,32 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
       return {call, call_dx};
     }
 
+    // The reverse_forw variants of callees are normally pre-derived through
+    // the DiffPlanner request graph. Visitor-driven nested requests (e.g. the
+    // per-row gradients built by the hessian mode) bypass the planner, so the
+    // lookup above can miss even though the call overwrites live memory and
+    // needs the store/restore treatment (skipping it leaves stale values for
+    // the adjoints of earlier statements, in particular across reversed loop
+    // iterations). Derive the reverse_forw on demand in that case.
+    if (!calleeFnForwPassFD && !hasDynamicNonDiffParams &&
+        (hasStoredParams || needsForwPass) && !nonDiff && !isCastSem &&
+        FD->isDefined() && !clad::utils::hasNonDifferentiableAttribute(FD) &&
+        !FD->isInStdNamespace() &&
+        !m_Sema.getSourceManager().isInSystemHeader(FD->getLocation())) {
+      bool wantTracker = utils::shouldUseRestoreTracker(FD);
+      if (utils::isMemoryType(returnType) || wantTracker) {
+        calleeFnForwPassReq.UseRestoreTracker = wantTracker;
+        calleeFnForwPassReq.CallContext = const_cast<clang::CallExpr*>(CE);
+        calleeFnForwPassFD = m_Builder.HandleNestedDiffRequest(calleeFnForwPassReq);
+        if (calleeFnForwPassFD && !calleeFnForwPassFD->parameters().empty()) {
+          QualType lastParamType =
+              calleeFnForwPassFD->parameters().back()->getType();
+          usingRestoreTracker =
+              (utils::GetValueType(lastParamType) == trackerType);
+        }
+      }
+    }
+
     if (calleeFnForwPassFD && !hasDynamicNonDiffParams &&
         (hasStoredParams || needsForwPass)) {
       if (const auto* CD = dyn_cast<CXXConversionDecl>(FD))
@@ -3204,8 +3237,26 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     }
 
     // Update the initializer
-    if (VDDerived)
-      SetDeclInit(VDDerived, initDiff.getExpr_dx(), isDirectInit);
+    if (VDDerived) {
+      Expr* dInit = initDiff.getExpr_dx();
+      // Adjoints must not be left indeterminate: the reverse sweep
+      // accumulates into them. When the initializer visit provides no dx
+      // (e.g. for aggregate results of C++17 copy-elided calls), the
+      // adjoint would be left with no initializer or with an implicit
+      // trivial default constructor, both of which leave the members
+      // indeterminate -- zero-initialize it instead.
+      if (!dInit && !isRefType && !isPointerType) {
+        const Expr* curInit = VDDerived->getInit();
+        bool indeterminate = !curInit;
+        if (const auto* CCE = dyn_cast_or_null<CXXConstructExpr>(curInit))
+          indeterminate = CCE->getConstructor()->isDefaultConstructor() &&
+                          CCE->getConstructor()->isTrivial();
+        if (indeterminate)
+          dInit = getZeroInit(VDDerivedType);
+      }
+      if (dInit)
+        SetDeclInit(VDDerived, dInit, isDirectInit);
+    }
 
     // FIXME: Currently, we handle promoteToFnScope for objects in
     // VisitDeclStmts. For other types, we do it in DifferentiateVarDecl. We
