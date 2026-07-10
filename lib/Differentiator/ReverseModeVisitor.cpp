@@ -2399,13 +2399,43 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
         } else {
           // Otherwise, generate the declaration
           // ``clad::restore_tracker _tracker0 = {};``
-          VarDecl* trackerDecl =
-              BuildVarDecl(trackerType, "_tracker", getZeroInit(trackerType));
-          addToCurrentBlock(BuildDeclStmt(trackerDecl));
+          // The declaration must be hoisted to the function entry (m_Globals):
+          // the call site may sit in a nested scope of the forward sweep,
+          // while the matching `_tracker0.restore()` runs in the reverse
+          // sweep, outside that scope. Declaring the tracker in the nested
+          // block leaves the reverse sweep with a dead (destructed or never
+          // constructed) object.
+          VarDecl* trackerDecl = BuildGlobalVarDecl(trackerType, "_tracker",
+                                                    getZeroInit(trackerType));
+          addToBlock(BuildDeclStmt(trackerDecl), m_Globals);
           trackerExpr = BuildDeclRef(trackerDecl);
+          // Open a fresh frame in the forward pass before the reverse_forw
+          // call. One frame per dynamic execution keeps repeated executions
+          // of this call site (multiple calls into the same storage, loop
+          // iterations) restorable in LIFO order in the reverse sweep.
+          Expr* beginFrameCall = BuildCallExprToMemFn(
+              BuildDeclRef(trackerDecl), /*MemberFunctionName=*/"begin_frame",
+              /*ArgExprs=*/{}, Loc);
+          addToCurrentBlock(beginFrameCall);
+          // In the reverse sweep, restore the pre-call state twice: before
+          // the pullback (its inputs must match the primal call) and after it
+          // (the pullback re-executes the primal writes while recomputing its
+          // intermediates, which would otherwise clobber the restored state
+          // that earlier adjoint statements still rely on). The second
+          // restore also pops the frame.
           Expr* restoreCall = BuildCallExprToMemFn(
               BuildDeclRef(trackerDecl), /*MemberFunctionName=*/"restore",
               /*ArgExprs=*/{}, Loc);
+          Expr* restorePopCall = BuildCallExprToMemFn(
+              BuildDeclRef(trackerDecl), /*MemberFunctionName=*/"restore_pop",
+              /*ArgExprs=*/{}, Loc);
+          // The pullback call and its PreCallStmts were inserted at
+          // insertionPoint above; place restore_pop right after them and
+          // restore right before them.
+          size_t postPullback =
+              insertionPoint + PreCallStmts.size() + (OverloadedDerivedFn ? 1 : 0);
+          it = std::begin(block) + postPullback;
+          block.insert(it, restorePopCall);
           it = std::begin(block) + insertionPoint;
           block.insert(it, restoreCall);
         }
@@ -3144,14 +3174,26 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
       VDCloneTSI = m_Context.getTrivialTypeSourceInfo(VDCloneType, noLoc);
     }
 
-    VDClone = BuildGlobalVarDecl(VDCloneType, VD->getNameAsString(),
-                                 initDiff.getExpr(), VD->isDirectInit(),
-                                 VDCloneTSI, SC);
-
-    // The choice of isDirectInit is mostly stylistic.
     bool isRealConstArray = false;
     if (const auto* arrType = dyn_cast<ConstantArrayType>(VDType))
       isRealConstArray = arrType->getElementType()->isRealType();
+
+    Expr* cloneInit = initDiff.getExpr();
+    // If the original declaration has no initializer, zero-initialize the
+    // clone when it is cheap to do so: the reverse sweep may store the
+    // pre-assignment values of this variable (tapes, restore trackers),
+    // and those stores would otherwise read indeterminate memory --
+    // undefined behavior that optimizers are entitled to propagate into
+    // the adjoints (observed as silently zeroed gradients at -O1+).
+    if (!cloneInit && !VD->getInit() && !isRefType && !isPointerType &&
+        (VDCloneType->isArithmeticType() || isRealConstArray))
+      cloneInit = getZeroInit(VDCloneType);
+
+    VDClone = BuildGlobalVarDecl(VDCloneType, VD->getNameAsString(),
+                                 cloneInit, VD->isDirectInit(),
+                                 VDCloneTSI, SC);
+
+    // The choice of isDirectInit is mostly stylistic.
     bool isDirectInit = VD->isDirectInit() && (!RD || isNonAggrClass);
     if (VDDerivedType->isBuiltinType() || !VD->getInit() || isRealConstArray) {
       initDiff.updateStmtDx(getZeroInit(VDType));
