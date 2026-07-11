@@ -2629,8 +2629,17 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
           } else
             hasDynamicNonDiffParams = true;
         }
-      if (!m_DiffReq.CallContext || hasDynamicNonDiffParams ||
-          FD->getNameAsString() == "cudaMemcpy") {
+      // The planner pre-derives pullbacks through the static request graph,
+      // but it cannot see through functions whose bodies do not exist at
+      // planning time (e.g. gradients of clad-generated functions). If the
+      // lookup above found nothing for a defined callee, fall back to
+      // on-demand derivation like dynamically scheduled requests do.
+      // (Lambdas and undefined functions keep their dedicated handling
+      // below.)
+      const bool onDemandPullback = !pullbackFD && FD->isDefined() &&
+                                    !((bool)MD && isLambdaCallOperator(MD));
+      if (onDemandPullback || !m_DiffReq.CallContext ||
+          hasDynamicNonDiffParams || FD->getNameAsString() == "cudaMemcpy") {
         pullbackFD = nullptr;
         // Try to find it in builtin derivatives.
         std::string customPullback = pullbackRequest.ComputeDerivativeName();
@@ -5825,9 +5834,13 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
                          prePullbackCallStmts.end());
       it += prePullbackCallStmts.size();
 
-      // FIXME: No call context corresponds to second derivatives used in
-      // hessians, which aren't scheduled statically yet.
-      if (!m_DiffReq.CallContext) {
+      // Custom constructor pullbacks are tried for dynamically scheduled
+      // requests, and also for planner-scheduled requests when the
+      // constructed object is a clad::ValueAndPushforward: that happens when
+      // differentiating clad-generated functions, whose bodies the planner
+      // could not traverse at planning time.
+      if (!m_DiffReq.CallContext ||
+          utils::IsCladValueAndPushforwardType(CE->getType())) {
         std::string customPullbackName = "constructor_pullback";
         pullbackCall = m_Builder.BuildCallToCustomDerivativeOrNumericalDiff(
             customPullbackName, pullbackArgs, getCurrentScope(), CE);
