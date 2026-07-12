@@ -4748,11 +4748,14 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
       pullbackArgs.append(adjointArgs.begin(), adjointArgs.end());
 
       Expr* pullbackCall = nullptr;
-      Stmts& curRevBlock = getCurrentBlock(direction::reverse);
-      Stmts::iterator it = std::begin(curRevBlock) + insertionPoint;
-      curRevBlock.insert(it, prePullbackCallStmts.begin(),
-                         prePullbackCallStmts.end());
-      it += prePullbackCallStmts.size();
+      {
+        Stmts& curRevBlock = getCurrentBlock(direction::reverse);
+        curRevBlock.insert(std::begin(curRevBlock) + insertionPoint,
+                           prePullbackCallStmts.begin(),
+                           prePullbackCallStmts.end());
+      }
+      // The pullback call goes right after the pre-pullback statements.
+      insertionPoint += prePullbackCallStmts.size();
 
       // Custom constructor pullbacks are tried for dynamically scheduled
       // requests, and also for planner-scheduled requests when the
@@ -4795,8 +4798,16 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
                   .get();
         }
       }
-      if (pullbackCall)
-        curRevBlock.insert(it, pullbackCall);
+      if (pullbackCall) {
+        // Recompute the block reference and the insertion iterator: the
+        // insert of the pre-pullback statements above may have reallocated
+        // the block's storage, and building the pullback call may have
+        // grown the block further (e.g. through on-demand nested
+        // derivation), so any previously computed iterator may be dangling.
+        Stmts& curRevBlock = getCurrentBlock(direction::reverse);
+        curRevBlock.insert(std::begin(curRevBlock) + insertionPoint,
+                           pullbackCall);
+      }
     }
 
     // Create the constructor call in the forward-pass, or creates
