@@ -1,4 +1,6 @@
 #include "clad/Differentiator/CladUtils.h"
+
+#include <cstdlib>
 #include "clad/Differentiator/Compatibility.h"
 
 #include "ConstantFolder.h"
@@ -1084,6 +1086,11 @@ namespace clad {
     }
 
     bool shouldUseRestoreTracker(const FunctionDecl* FD) {
+      // Diagnostic opt-out: build with CLAD_NO_RESTORE_TRACKER=1 to remove the
+      // tracker entirely and fall back to the value/tape path. Costs ~20% on
+      // gradient-heavy work; used to test whether a fault is tracker-related.
+      if (getenv("CLAD_NO_RESTORE_TRACKER"))
+        return false;
       const auto* MD = dyn_cast<CXXMethodDecl>(FD);
       if (MD && MD->isInstance() && !MD->isConst())
         return true;
