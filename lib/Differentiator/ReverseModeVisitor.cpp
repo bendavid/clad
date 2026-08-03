@@ -77,6 +77,50 @@ using namespace clang;
 
 namespace clad {
 
+/// Is `E` provably rooted at an automatic local of the function being built?
+///
+/// Walk the lvalue down to the declaration it is rooted at. Going through a
+/// pointer leaves this frame, so the storage belongs to someone else; a chain
+/// of member or array accesses inherits its base's lifetime. Only answers YES
+/// when certain.
+static bool rootedAtAutomaticLocal(const clang::Expr* E) {
+  using namespace clang;
+  E = E->IgnoreParenCasts();
+  while (true) {
+    if (const auto* ME = dyn_cast<MemberExpr>(E)) {
+      if (ME->isArrow())
+        return false;
+      E = ME->getBase()->IgnoreParenCasts();
+      continue;
+    }
+    if (const auto* ASE = dyn_cast<ArraySubscriptExpr>(E)) {
+      const Expr* base = ASE->getBase()->IgnoreParenCasts();
+      if (base->getType()->isPointerType())
+        return false;
+      E = base;
+      continue;
+    }
+    if (const auto* UO = dyn_cast<UnaryOperator>(E)) {
+      if (UO->getOpcode() == UO_Deref)
+        return false;
+      if (UO->getOpcode() == UO_AddrOf) {
+        E = UO->getSubExpr()->IgnoreParenCasts();
+        continue;
+      }
+    }
+    break;
+  }
+  if (const auto* DRE = dyn_cast<DeclRefExpr>(E)) {
+    const auto* VD = dyn_cast<VarDecl>(DRE->getDecl());
+    if (!VD || VD->getType()->isReferenceType())
+      return false;
+    return VD->hasLocalStorage();
+  }
+  return false;
+}
+
+
+
 Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
   if (E)
     if (const auto* CXXILE =
@@ -2485,6 +2529,51 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
       // Add the tracker as the last argument of the reverse_forw.
       if (trackerExpr)
         CallArgs.push_back(trackerExpr);
+      // FRAME-SHARING EXCEPTION. A nested reverse_forw shares this frame, so
+      // anything it stores through a pointer to one of OUR locals is filed in a
+      // frame that outlives that local: every restore runs only after all
+      // reverse_forw frames have returned, so such an entry can never be
+      // usefully applied and writing it back lands in a dead frame. Discard
+      // exactly those, by address range, right after the call. Entries
+      // recording the CALLER's objects -- what the tracker exists for -- are
+      // untouched.
+      if (m_RestoreTracker && trackerExpr) {
+        for (unsigned ai = 0; ai < CE->getNumArgs(); ++ai) {
+          const Expr* origArg = CE->getArg(ai);
+          if (!rootedAtAutomaticLocal(origArg))
+            continue;
+          const Expr* base = origArg->IgnoreParenCasts();
+          while (true) {
+            if (const auto* ME = dyn_cast<MemberExpr>(base))
+              base = ME->getBase()->IgnoreParenCasts();
+            else if (const auto* ASE = dyn_cast<ArraySubscriptExpr>(base))
+              base = ASE->getBase()->IgnoreParenCasts();
+            else if (const auto* UO = dyn_cast<UnaryOperator>(base))
+              base = UO->getSubExpr()->IgnoreParenCasts();
+            else
+              break;
+          }
+          const auto* DRE = dyn_cast<DeclRefExpr>(base);
+          if (!DRE)
+            continue;
+          const auto* VD = dyn_cast<VarDecl>(DRE->getDecl());
+          if (!VD)
+            continue;
+          // Clone maps the ORIGINAL declaration onto this generated
+          // function's own; BuildDeclRef on VD would reference a local of the
+          // primal, which is not in scope here.
+          Expr* cloned = Clone(const_cast<Expr*>(base));
+          if (!cloned)
+            continue;
+          Expr* addr = BuildOp(UO_AddrOf, cloned);
+          Expr* size = ConstantFolder::synthesizeLiteral(
+              m_Context.getSizeType(), m_Context,
+              m_Context.getTypeSizeInChars(VD->getType()).getQuantity());
+          clang::Expr* dropArgs[] = {addr, size};
+          m_PendingTrackerDrops.push_back(BuildCallExprToMemFn(
+              trackerExpr, /*MemberFunctionName=*/"drop_range", dropArgs, Loc));
+        }
+      }
       call =
           BuildCallExprToFunction(calleeFnForwPassFD, CallArgs, CUDAExecConfig);
       if (!needsForwPass ||

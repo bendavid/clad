@@ -214,16 +214,58 @@ ReverseModeForwPassVisitor::BuildParams(DiffParams& diffParams) {
   return params;
 }
 
+namespace {
+/// Is `E` provably rooted at an automatic local of the reverse_forw being
+/// generated? Such an address dies when this frame returns, while every
+/// restore() runs later, from the pullback.
+bool rootedAtAutomaticLocal(const Expr* E) {
+  E = E->IgnoreParenCasts();
+  while (true) {
+    if (const auto* ME = dyn_cast<MemberExpr>(E)) {
+      if (ME->isArrow())
+        return false;
+      E = ME->getBase()->IgnoreParenCasts();
+      continue;
+    }
+    if (const auto* ASE = dyn_cast<ArraySubscriptExpr>(E)) {
+      const Expr* base = ASE->getBase()->IgnoreParenCasts();
+      if (base->getType()->isPointerType())
+        return false;
+      E = base;
+      continue;
+    }
+    if (const auto* UO = dyn_cast<UnaryOperator>(E)) {
+      if (UO->getOpcode() == UO_Deref)
+        return false;
+      if (UO->getOpcode() == UO_AddrOf) {
+        E = UO->getSubExpr()->IgnoreParenCasts();
+        continue;
+      }
+    }
+    break;
+  }
+  if (const auto* DRE = dyn_cast<DeclRefExpr>(E)) {
+    const auto* VD = dyn_cast<VarDecl>(DRE->getDecl());
+    if (!VD || VD->getType()->isReferenceType())
+      return false;
+    return VD->hasLocalStorage();
+  }
+  return false;
+}
+} // namespace
+
 StmtDiff ReverseModeForwPassVisitor::StoreAndRestore(clang::Expr* E,
                                                      llvm::StringRef prefix,
                                                      bool moveToTape) {
   if (!m_RestoreTracker)
     return {};
-  if (const auto* DRE = dyn_cast<DeclRefExpr>(E->IgnoreCasts())) {
-    const auto* VD = cast<VarDecl>(DRE->getDecl());
-    if (!VD->getType()->isReferenceType())
-      return {};
-  }
+  // A reverse_forw stores the pre-value of everything it writes, including
+  // its OWN locals. The tracker keeps the ADDRESS and the pullback writes it
+  // back later, by which time this frame is gone -- and the pullback has its
+  // own copies of those locals anyway, so the entry was never useful. Decline
+  // it. This generalises the old check, which only caught a bare local.
+  if (rootedAtAutomaticLocal(E))
+    return {};
   Expr* storeCall = BuildCallExprToMemFn(m_RestoreTracker,
                                          /*MemberFunctionName=*/"store", {E});
   return {storeCall};
@@ -231,6 +273,16 @@ StmtDiff ReverseModeForwPassVisitor::StoreAndRestore(clang::Expr* E,
 
 StmtDiff ReverseModeForwPassVisitor::ProcessSingleStmt(const clang::Stmt* S) {
   StmtDiff SDiff = Visit(S);
+  // Flush any drop_range() the call above asked for. They must land AFTER the
+  // call statement, which is why they are queued rather than emitted inline.
+  if (!m_PendingTrackerDrops.empty()) {
+    beginBlock();
+    addToCurrentBlock(SDiff.getStmt());
+    for (Stmt* drop : m_PendingTrackerDrops)
+      addToCurrentBlock(drop);
+    m_PendingTrackerDrops.clear();
+    return {endBlock()};
+  }
   return {SDiff.getStmt()};
 }
 

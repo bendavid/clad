@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -71,6 +72,29 @@ public:
     for (std::size_t i = m_stack.size(); i-- > current_frame_begin();)
       std::memcpy(m_stack[i].m_addr, m_stack[i].m_bytes.data(),
                   m_stack[i].m_bytes.size());
+  }
+
+  // Discard entries in the current frame that point into [p, p + n).
+  //
+  // A reverse_forw that hands one of its OWN locals to a nested reverse_forw
+  // would otherwise leave that call's entries -- which record the local's
+  // address -- in the shared frame. Every restore runs after all reverse_forw
+  // frames have returned, so such an entry can never be usefully applied;
+  // writing it back lands in a frame that is gone and clobbers whatever
+  // occupies it. Entries recording the CALLER's objects, which is what the
+  // tracker exists for, are left alone.
+  void drop_range(const void* p, std::size_t n) {
+    const char* lo = static_cast<const char*>(p);
+    const char* hi = lo + n;
+    m_stack.erase(
+        std::remove_if(
+            m_stack.begin() +
+                static_cast<std::ptrdiff_t>(current_frame_begin()),
+            m_stack.end(),
+            [lo, hi](const Entry& e) {
+              return e.m_addr >= lo && e.m_addr < hi;
+            }),
+        m_stack.end());
   }
 
   // Restore the current frame and discard it.

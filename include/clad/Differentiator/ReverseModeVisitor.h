@@ -102,6 +102,11 @@ namespace clad {
     clang::Expr* m_CurrentBreakFlagExpr;
 
     clang::Expr* m_RestoreTracker = nullptr;
+    /// drop_range() calls to emit immediately AFTER the nested reverse_forw
+    /// call currently being built. Nested calls share the caller's frame, so
+    /// entries recording one of THIS frame's locals must be discarded before
+    /// the frame goes away -- see the exception in VisitCallExpr.
+    llvm::SmallVector<clang::Stmt*, 2> m_PendingTrackerDrops;
 
     unsigned outputArrayCursor = 0;
     unsigned numParams = 0;
