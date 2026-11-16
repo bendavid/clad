@@ -432,6 +432,9 @@ static void registerDerivative(Decl* D, Sema& S, const DiffRequest& R) {
     FunctionDecl* derivative = this->FindDerivedFunction(request);
     if (!derivative) {
       alreadyDerived = false;
+      // PlanNestedRequest above spawns no sub-requests, so nothing was
+      // pre-derived for the calls in this function's body.
+      request.CalleesUnplanned = true;
       // FIXME: Our analyses are closely tied to the DiffPlanner. The varied
       // and useful analyses have to be run eagerly by the planner and it does
       // not do so for dynamically scheduled requests, so they stay off. TBR

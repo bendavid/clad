@@ -1914,6 +1914,10 @@ static QualType GetDerivedFunctionType(const CallExpr* CE) {
     llvm::SaveAndRestore<DiffRequest*> Saved(m_ParentReq, &request);
     if (request.Function->getDefinition())
       request.Function = request.Function->getDefinition();
+    else
+      // No body to walk yet (e.g. a derivative clad has still to generate):
+      // whatever its calls need is left for the visitor to derive on demand.
+      request.CalleesUnplanned = true;
 
     // Functions with side-effects require TBR.
     bool isNonConstMethod = false;

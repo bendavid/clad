@@ -345,6 +345,16 @@ public:
   /// A flag to request a clad::restore_tracker parameter in the generated
   /// _reverse_forw function.
   bool UseRestoreTracker = false;
+  /// Set when the static planner never walked the body of Function for this
+  /// request: the request was scheduled lazily by a visitor
+  /// (DerivativeBuilder::HandleNestedDiffRequest), or the body did not exist
+  /// yet at planning time (a function clad itself generates). The derivatives
+  /// of its callees were then not pre-derived, and the reverse-mode visitor
+  /// derives the ones it needs on demand. Where the planner did walk the
+  /// body its decisions stand, including the decision not to derive
+  /// something. Says how the request was scheduled, not what it asks for, and
+  /// is therefore excluded from request equality.
+  bool CalleesUnplanned = false;
   /// The function whose body holds the call asking for this derivative, or
   /// null at namespace scope. Read from where the call is, not from anything
   /// a user asks for; what it means for scheduling is decided in one place,

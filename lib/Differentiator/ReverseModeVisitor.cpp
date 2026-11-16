@@ -2419,6 +2419,40 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     return {buildClonedLambda(LE), lambdaE};
   }
 #endif // CLANG_VERSION_MAJOR
+  /// Whether a pullback for \p FD is declared among the custom derivatives.
+  /// Such a callee is opaque to clad: the planner schedules no reverse_forw
+  /// for it, and its body is not to be differentiated on the user's behalf.
+  /// A lookup by name only, so that it never diagnoses; a declaration whose
+  /// signature would not match errs on the side of leaving the callee alone.
+  static bool hasCustomPullbackDecl(Sema& S, const FunctionDecl* FD,
+                                    const std::string& baseName) {
+    NamespaceDecl* cladNS = utils::LookupNSD(S, "clad", /*shouldExist=*/true);
+    NamespaceDecl* customDerNS = utils::LookupNSD(
+        S, "custom_derivatives", /*shouldExist=*/false, cladNS);
+    if (!customDerNS)
+      return false;
+    DeclarationName name =
+        &S.getASTContext().Idents.get(baseName + "_pullback");
+    auto declaredIn = [&](NamespaceDecl* NSD) {
+      DeclContext* DC = NSD;
+      if (isa<CXXMethodDecl>(FD))
+        DC = utils::LookupNSD(S, "class_functions", /*shouldExist=*/false, DC);
+      else
+        DC = utils::FindDeclContext(S, DC, FD->getDeclContext());
+      if (!DC)
+        return false;
+      LookupResult R(S, name, noLoc, Sema::LookupOrdinaryName);
+      R.suppressDiagnostics();
+      S.LookupQualifiedName(R, DC);
+      return !R.empty();
+    };
+    if (NamespaceDecl* overridesNS = utils::LookupNSD(
+            S, "overrides", /*shouldExist=*/false, customDerNS))
+      if (declaredIn(overridesNS))
+        return true;
+    return declaredIn(customDerNS);
+  }
+
   StmtDiff ReverseModeVisitor::VisitCallExpr(const CallExpr* CE) {
     // FIXME: Add general support for non-direct calls
     const Expr* callee = CE->getCallee();
@@ -2847,11 +2881,13 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
       // The planner pre-derives pullbacks through the static request graph,
       // but it cannot see through functions whose bodies do not exist at
       // planning time (e.g. gradients of clad-generated functions). If the
-      // lookup above found nothing for a defined callee, fall back to
-      // on-demand derivation like dynamically scheduled requests do.
-      // (Lambdas and undefined functions keep their dedicated handling
-      // below.)
-      const bool onDemandPullback = !pullbackFD && FD->isDefined() &&
+      // lookup above found nothing for a defined callee there, fall back to
+      // on-demand derivation like dynamically scheduled requests do. Where
+      // the planner did walk this function, finding nothing is its decision
+      // and stands. (Lambdas and undefined functions keep their dedicated
+      // handling below.)
+      const bool onDemandPullback = m_DiffReq.CalleesUnplanned && !pullbackFD &&
+                                    FD->isDefined() &&
                                     !((bool)MD && isLambdaCallOperator(MD));
       if (onDemandPullback || !m_DiffReq.CallContext ||
           hasDynamicNonDiffParams || FD->getNameAsString() == "cudaMemcpy") {
@@ -3005,12 +3041,19 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     // lookup above can miss even though the call overwrites live memory and
     // needs the store/restore treatment (skipping it leaves stale values for
     // the adjoints of earlier statements, in particular across reversed loop
-    // iterations). Derive the reverse_forw on demand in that case.
-    if (!calleeFnForwPassFD && !hasDynamicNonDiffParams &&
+    // iterations). Derive the reverse_forw on demand in that case, by the
+    // planner's own rule: never for a callee with a custom pullback, and only
+    // for a result that carries an adjoint or a callee that overwrites memory.
+    // Where the planner did walk this function, a missing reverse_forw is its
+    // decision and stands.
+    if (m_DiffReq.CalleesUnplanned && !calleeFnForwPassFD &&
+        (!hasDynamicNonDiffParams || !needsForwPass) &&
         (hasStoredParams || needsForwPass) && !nonDiff && !isCastSem &&
         FD->isDefined() && !clad::utils::hasNonDifferentiableAttribute(FD) &&
         !FD->isInStdNamespace() &&
-        !m_Sema.getSourceManager().isInSystemHeader(FD->getLocation())) {
+        !m_Sema.getSourceManager().isInSystemHeader(FD->getLocation()) &&
+        !hasCustomPullbackDecl(m_Sema, FD,
+                               calleeFnForwPassReq.BaseFunctionName)) {
       bool wantTracker = utils::shouldUseRestoreTracker(FD);
       if (utils::isMemoryType(returnType) || wantTracker) {
         calleeFnForwPassReq.UseRestoreTracker = wantTracker;
