@@ -1127,6 +1127,31 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
                       .get();
       if (ResultRef->isModifiableLvalue(m_Context) != Expr::MLV_Valid)
         ResultRef = nullptr;
+    } else if (CO->getType()->isPointerType() && ifTrueExprDiff.getExpr_dx() &&
+               ifFalseExprDiff.getExpr_dx()) {
+      // A pointer-valued conditional is an rvalue, but it still has an
+      // adjoint: the adjoint storage of the branch taken. Without it a pointer
+      // initialized from one has no adjoint, and whatever is read through it
+      // passes nothing back. A pushforward guards each tangent it derives from
+      // a tangent pointer that may be null this way (`_d_p ? _d_p + k :
+      // nullptr`), so the reverse pass of a hessian otherwise drops the whole
+      // second-order contribution of an array read through pointer
+      // arithmetic. A null branch keeps the primal's conversion to the
+      // primal pointer type (const for a tangent); a bare nullptr lets the
+      // conditional take the adjoint pointer's type instead.
+      auto adjointBranch = [this](Expr* dx) -> Expr* {
+        if (isa<CXXNullPtrLiteralExpr>(dx->IgnoreParenImpCasts()) ||
+            dx->isNullPointerConstant(m_Context,
+                                      Expr::NPC_ValueDependentIsNotNull))
+          return m_Sema.ActOnCXXNullPtrLiteral(noLoc).get();
+        return dx;
+      };
+      ResultRef =
+          m_Sema
+              .ActOnConditionalOp(noLoc, noLoc, CloneNode(condStored),
+                                  adjointBranch(ifTrueExprDiff.getExpr_dx()),
+                                  adjointBranch(ifFalseExprDiff.getExpr_dx()))
+              .get();
     }
     Stmt* revBlock = utils::unwrapIfSingleStmt(endBlock(direction::reverse));
     addToCurrentBlock(revBlock, direction::reverse);
