@@ -2295,8 +2295,12 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
       // Visit using uninitialized reference.
       argDiff = Visit(arg, BuildDeclRef(dArgDecl));
       if (shouldCopyInitialize) {
+        // The same expression is handed on below as the reverse-sweep value
+        // of the argument (a constructor uses it to build the adjoint
+        // object); the declaration takes a node of its own, or the two
+        // initializers end up sharing their elements.
         if (Expr* dInit = argDiff.getExpr_dx())
-          SetDeclInit(dArgDecl, dInit);
+          SetDeclInit(dArgDecl, CloneNode(dInit));
         else
           SetDeclInit(dArgDecl, getZeroInit(dArgTy));
       }
@@ -4039,6 +4043,11 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
         ComputeEffectiveDOperands(Ldiff, Rdiff, derivedL, derivedR);
         if (derivedR == Rdiff.getExpr())
           derivedR = CloneNode(derivedR);
+        // ResultRef is returned as the adjoint of this expression, and a
+        // chained assignment (`q = p = e`) takes it as the operand of the
+        // next one; the statement emitted here needs a node of its own.
+        if (derivedL && derivedL == ResultRef)
+          derivedL = CloneNode(derivedL);
         addToCurrentBlock(BuildOp(opCode, derivedL, derivedR),
                           direction::forward);
         if (opCode == BO_Assign && derivedL && derivedR)
