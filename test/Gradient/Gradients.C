@@ -547,13 +547,14 @@ void f_decls3_grad(double x, double y, double *_d_x, double *_d_y);
 //CHECK:   void f_decls3_grad(double x, double y, double *_d_x, double *_d_y) {
 //CHECK-NEXT:       bool _cond0 = false;
 //CHECK-NEXT:       bool _cond1 = false;
+//CHECK-NEXT:       int _returned0 = 0;
 //CHECK-NEXT:       double _d_a = 0.;
 //CHECK-NEXT:       double a = 3 * x;
 //CHECK-NEXT:       double _d_c = 0.;
 //CHECK-NEXT:       double c = 333 * y;
 //CHECK-NEXT:       double _d_b = 0.;
 //CHECK-NEXT:       auto _rev0 = [&] {
-//CHECK-NEXT:           {
+//CHECK-NEXT:           if (!_returned0) {
 //CHECK-NEXT:               _d_a += _d_b * a;
 //CHECK-NEXT:               _d_a += a * _d_b;
 //CHECK-NEXT:           }
@@ -567,11 +568,13 @@ void f_decls3_grad(double x, double y, double *_d_x, double *_d_y);
 //CHECK-NEXT:       {
 //CHECK-NEXT:       _cond0 = x > 1;
 //CHECK-NEXT:       if (_cond0) {
+//CHECK-NEXT:           _returned0 = 1;
 //CHECK-NEXT:           _rev0();
 //CHECK-NEXT:           return;
 //CHECK-NEXT:       } else {
 //CHECK-NEXT:           _cond1 = x < -1;
 //CHECK-NEXT:           if (_cond1) {
+//CHECK-NEXT:               _returned0 = 2;
 //CHECK-NEXT:               _rev0();
 //CHECK-NEXT:               return;
 //CHECK-NEXT:           }

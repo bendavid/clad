@@ -84,6 +84,33 @@ namespace clad {
     /// with `{ _rev(); return; }` at finalization, where `_rev` is the lambda
     /// wrapping the master reverse sweep.
     llvm::SmallPtrSet<clang::Stmt*, 4> m_EarlyReturnMarkers;
+    /// A function-scope integer naming the early return the forward sweep
+    /// left through: its 1-based position among m_EarlyReturnMarkers, in the
+    /// order they are visited, or 0 for none. Set right before the return
+    /// calls the reverse-sweep lambda. Until the reverse sweep reaches that
+    /// return it is passing over code that follows it, which the forward
+    /// sweep never ran; VisitCompoundStmt skips the reverse of that code.
+    /// Created by the first statement that needs to test it, so a function
+    /// whose early returns have nothing after them is left as it was.
+    clang::VarDecl* m_EarlyReturnTaken = nullptr;
+    clang::VarDecl* getEarlyReturnTaken();
+    /// The value m_EarlyReturnTaken takes at each marker.
+    llvm::DenseMap<const clang::Stmt*, unsigned> m_EarlyReturnIndex;
+    /// How many early returns the function has.
+    unsigned m_NumEarlyReturns = 0;
+    /// The early returns inside a loop some later statement of which follows
+    /// them: an earlier iteration ran that statement, so the reverse sweep
+    /// has to stop skipping once it is past the return.
+    llvm::SmallPtrSet<const clang::ReturnStmt*, 4> m_EarlyReturnsFollowedInLoop;
+    /// The number of early returns the statement being visited is already
+    /// guarded by, through itself or a statement around it.
+    unsigned m_ActiveReturnGuard = 0;
+    /// Guards \p Step, the reverse of what a loop runs between two iterations
+    /// (the increment of a for loop), against the early returns of the loop
+    /// body, those visited since there were \p returnsBefore of them: the
+    /// iteration one of them left did not get to that step.
+    clang::Stmt* SkipLoopStepAfterEarlyReturn(clang::Stmt* Step,
+                                              unsigned returnsBefore);
     /// Storing expressions to delete/free memory in the reverse pass.
     Stmts m_DeallocExprs;
     /// A dfdx seed: eager expression, or a deferred builder materialized on
@@ -149,13 +176,14 @@ namespace clad {
     void DifferentiateWithEnzyme();
 
     /// Walk the current forward block and replace every Stmt in
-    /// m_EarlyReturnMarkers with a fresh Stmt built by `MakeReplacement`.
+    /// m_EarlyReturnMarkers with a fresh Stmt built by `MakeReplacement`,
+    /// which is told the marker it replaces.
     /// Each marker gets its own node — sharing one replacement across sites
     /// would give it multiple parents and break the single-parent AST
     /// invariant. Called once at function-body finalization, after the
     /// forward sweep is fully assembled and before the body is handed to Sema.
-    void
-    patchEarlyReturnMarkers(llvm::function_ref<clang::Stmt*()> MakeReplacement);
+    void patchEarlyReturnMarkers(
+        llvm::function_ref<clang::Stmt*(const clang::Stmt*)> MakeReplacement);
 
   public:
     using direction = rmv::direction;

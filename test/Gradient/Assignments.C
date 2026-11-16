@@ -120,17 +120,19 @@ double f5(double x, double y) {
 //CHECK-NEXT:       bool _cond1 = false;
 //CHECK-NEXT:       double _d_z = 0.;
 //CHECK-NEXT:       double z = 0.;
+//CHECK-NEXT:       int _returned0 = 0;
 //CHECK-NEXT:       double _d_t = 0.;
 //CHECK-NEXT:       double t = x * x;
 //CHECK-NEXT:       auto _rev0 = [&] {
-//CHECK-NEXT:       if (_cond1) {
-//CHECK-NEXT:           {
-//CHECK-NEXT:               double _r_d1 = _d_t;
-//CHECK-NEXT:               _d_t = 0.;
-//CHECK-NEXT:               _d_t += -_r_d1;
+//CHECK-NEXT:       if (!_returned0)
+//CHECK-NEXT:           if (_cond1) {
+//CHECK-NEXT:               {
+//CHECK-NEXT:                   double _r_d1 = _d_t;
+//CHECK-NEXT:                   _d_t = 0.;
+//CHECK-NEXT:                   _d_t += -_r_d1;
+//CHECK-NEXT:               }
+//CHECK-NEXT:               _d_t += _d_z;
 //CHECK-NEXT:           }
-//CHECK-NEXT:           _d_t += _d_z;
-//CHECK-NEXT:       }
 //CHECK-NEXT:       if (_cond0) {
 //CHECK-NEXT:           _d_t += 1;
 //CHECK-NEXT:           {
@@ -149,6 +151,7 @@ double f5(double x, double y) {
 //CHECK-NEXT:       if (_cond0) {
 //CHECK-NEXT:           t = -t;
 //CHECK-NEXT:           {
+//CHECK-NEXT:               _returned0 = 1;
 //CHECK-NEXT:               _rev0();
 //CHECK-NEXT:               return;
 //CHECK-NEXT:           }
@@ -184,17 +187,19 @@ double f6(double x, double y) {
 //CHECK-NEXT:       bool _cond1 = false;
 //CHECK-NEXT:       double _d_z = 0.;
 //CHECK-NEXT:       double z = 0.;
+//CHECK-NEXT:       int _returned0 = 0;
 //CHECK-NEXT:       double _d_t = 0.;
 //CHECK-NEXT:       double t = x * x;
 //CHECK-NEXT:       auto _rev0 = [&] {
-//CHECK-NEXT:       if (_cond1) {
-//CHECK-NEXT:           {
-//CHECK-NEXT:               double _r_d1 = _d_t;
-//CHECK-NEXT:               _d_t = 0.;
-//CHECK-NEXT:               _d_t += -_r_d1;
+//CHECK-NEXT:       if (!_returned0)
+//CHECK-NEXT:           if (_cond1) {
+//CHECK-NEXT:               {
+//CHECK-NEXT:                   double _r_d1 = _d_t;
+//CHECK-NEXT:                   _d_t = 0.;
+//CHECK-NEXT:                   _d_t += -_r_d1;
+//CHECK-NEXT:               }
+//CHECK-NEXT:               _d_t += _d_z;
 //CHECK-NEXT:           }
-//CHECK-NEXT:           _d_t += _d_z;
-//CHECK-NEXT:       }
 //CHECK-NEXT:       if (_cond0) {
 //CHECK-NEXT:           _d_t += 1;
 //CHECK-NEXT:           {
@@ -213,6 +218,7 @@ double f6(double x, double y) {
 //CHECK-NEXT:       if (_cond0) {
 //CHECK-NEXT:           t = -t;
 //CHECK-NEXT:           {
+//CHECK-NEXT:               _returned0 = 1;
 //CHECK-NEXT:               _rev0();
 //CHECK-NEXT:               return;
 //CHECK-NEXT:           }

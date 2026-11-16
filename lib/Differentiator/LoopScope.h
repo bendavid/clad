@@ -43,6 +43,10 @@ struct ReverseModeVisitor::LoopScope {
   bool Tapes;
   /// Whether this loop or one around it is checkpointed.
   bool Checkpointed;
+  /// Whether the reverse sweep undoes something the loop runs between two
+  /// iterations (the increment of a for loop). The iteration an early return
+  /// left did not get there.
+  bool StepHasReverse = false;
   /// The loop whose accumulators an adjoint read here is summed in: this one,
   /// one around it, or none. A loop that sums nothing hides the accumulators
   /// of the loops around it, since a sum kept there would not be its own.

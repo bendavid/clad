@@ -648,13 +648,21 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
       // Patch each marker with its own fresh `{ _rev(); return; }`. A single
       // shared replacement would land under several parents and violate the
       // single-parent AST invariant, so build one per marker site.
-      patchEarlyReturnMarkers([&]() -> Stmt* {
+      patchEarlyReturnMarkers([&](const Stmt* Marker) -> Stmt* {
         Expr* RevCallEarly = BuildCallExpr(BuildDeclRef(RevVD), {});
         Stmt* RetStmt = m_Sema
                             .ActOnReturnStmt(noLoc, /*RetValExpr=*/nullptr,
                                              getCurrentScope())
                             .get();
-        return MakeCompoundStmt({RevCallEarly, RetStmt});
+        // Tell the reverse sweep which return it is called from, so that it
+        // skips the code that follows it (see VisitReturnStmt).
+        auto Index = m_EarlyReturnIndex.find(Marker);
+        if (!m_EarlyReturnTaken || Index == m_EarlyReturnIndex.end())
+          return MakeCompoundStmt({RevCallEarly, RetStmt});
+        Expr* Taken = BuildOp(BO_Assign, BuildDeclRef(m_EarlyReturnTaken),
+                              ConstantFolder::synthesizeLiteral(
+                                  m_Context.IntTy, m_Context, Index->second));
+        return MakeCompoundStmt({Taken, RevCallEarly, RetStmt});
       });
 
       // Natural-tail path: the tail-return seed was already emitted into the
@@ -871,12 +879,44 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     ScopeRAII compoundScope(*this, scopeFlags);
     beginBlock(direction::forward);
     beginBlock(direction::reverse);
+    // An early return calls the reverse sweep as a whole. If one that precedes
+    // a statement was taken, the forward sweep did not run that statement, and
+    // the reverse sweep must not run its reverse either (see VisitReturnStmt).
+    // The returns visited so far are exactly those that precede the statement
+    // in the source; one taken in an earlier iteration of an enclosing loop
+    // has been cleared by the time the sweep is back here. The reverse of a
+    // switch body is entered through its case labels, which already select
+    // what ran, and stays as it is.
+    bool isSwitchBody =
+        !m_BreakContStmtHandlers.empty() &&
+        GetActiveBreakContStmtHandler()->m_IsInvokedBySwitchStmt;
     for (Stmt* S : CS->body()) {
       if (m_ExternalSource)
         m_ExternalSource->ActBeforeDifferentiatingStmtInVisitCompoundStmt();
+      unsigned numReturns = m_EarlyReturnMarkers.size();
+      // A statement inside one that is guarded by the same returns needs no
+      // guard of its own.
+      bool guard = !isSwitchBody && numReturns > m_ActiveReturnGuard;
+      llvm::SaveAndRestore<unsigned> ActiveGuard(
+          m_ActiveReturnGuard, guard ? numReturns : m_ActiveReturnGuard);
       StmtDiff SDiff = DifferentiateSingleStmt(S);
       addToCurrentBlock(SDiff.getStmt(), direction::forward);
-      addToCurrentBlock(SDiff.getStmt_dx(), direction::reverse);
+      Stmt* SReverse = SDiff.getStmt_dx();
+      if (guard && SReverse && !isa<DeclStmt>(SReverse) &&
+          !isa<NullStmt>(SReverse)) {
+        // `!_returned || _returned > numReturns`: none was taken, or one that
+        // comes after this statement. There is no such one after the last.
+        Expr* cond = BuildOp(UO_LNot, BuildDeclRef(getEarlyReturnTaken()));
+        if (numReturns < m_NumEarlyReturns)
+          cond = BuildOp(BO_LOr, cond,
+                         BuildOp(BO_GT, BuildDeclRef(getEarlyReturnTaken()),
+                                 ConstantFolder::synthesizeLiteral(
+                                     m_Context.IntTy, m_Context, numReturns)));
+        SReverse = clad_compat::IfStmt_Create(
+            m_Context, noLoc, /*IsConstexpr=*/false, /*Init=*/nullptr,
+            /*Var=*/nullptr, cond, noLoc, noLoc, SReverse);
+      }
+      addToCurrentBlock(SReverse, direction::reverse);
 
       if (m_ExternalSource)
         m_ExternalSource->ActAfterProcessingStmtInVisitCompoundStmt();
@@ -1165,6 +1205,8 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     Expr* d_decBegin = BuildOp(UO_PostDec, CloneNode(d_beginDeclRef));
     Expr* forwardCond = BuildOp(BO_NE, CloneNode(beginDeclRef), endExpr);
     const Stmt* body = FRS->getBody();
+    Loop.StepHasReverse = true;
+    unsigned returnsBeforeBody = m_EarlyReturnMarkers.size();
     StmtDiff bodyDiff =
         DifferentiateLoopBody(body, loopCounter, nullptr, nullptr,
                               /*isForLoop=*/true, FRS->getForLoc());
@@ -1209,7 +1251,9 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
         m_Sema.getASTContext(), bodyDiff.getStmt(), LoopVDForwardDiff);
 
     beginBlock(direction::forward);
-    addToCurrentBlock(d_decBegin);
+    // The iteration an early return left did not step the iterators.
+    addToCurrentBlock(
+        SkipLoopStepAfterEarlyReturn(d_decBegin, returnsBeforeBody));
     addToCurrentBlock(storeLoop.getStmt_dx());
     addToCurrentBlock(storeAdjLoop.getStmt_dx());
     CompoundStmt* LoopVDReverseDiff = endBlock(direction::forward);
@@ -1412,6 +1456,7 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
                                          incExprDiff.getExpr(), CommaJoin));
     }
 
+    Loop.StepHasReverse = incDiff.getStmt_dx() != nullptr;
     const Stmt* body = FS->getBody();
     StmtDiff BodyDiff;
     {
@@ -1578,6 +1623,121 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     return StmtDiff(Clone(NPE), Clone(NPE));
   }
 
+  /// Whether evaluating \p E pushes to a clad tape.
+  static bool containsTapePush(Expr* E) {
+    struct Finder : RecursiveASTVisitor<Finder> {
+      bool Found = false;
+      bool VisitCallExpr(CallExpr* CE) {
+        if (const FunctionDecl* FD = CE->getDirectCallee())
+          if (FD->getIdentifier() && FD->getName() == "push")
+            if (const auto* NS = dyn_cast<NamespaceDecl>(
+                    FD->getDeclContext()->getEnclosingNamespaceContext()))
+              Found = NS->getIdentifier() && NS->getName() == "clad";
+        return !Found;
+      }
+    } F;
+    F.TraverseStmt(E);
+    return F.Found;
+  }
+
+  Stmt*
+  ReverseModeVisitor::SkipLoopStepAfterEarlyReturn(Stmt* Step,
+                                                   unsigned returnsBefore) {
+    unsigned returnsAfter = m_EarlyReturnMarkers.size();
+    if (!Step || returnsAfter == returnsBefore)
+      return Step;
+    // `!_returned || _returned > returnsAfter`. A return before the loop does
+    // not have to be told apart: the loop it skipped is not swept at all.
+    Expr* cond = BuildOp(UO_LNot, BuildDeclRef(getEarlyReturnTaken()));
+    if (returnsAfter < m_NumEarlyReturns)
+      cond = BuildOp(BO_LOr, cond,
+                     BuildOp(BO_GT, BuildDeclRef(getEarlyReturnTaken()),
+                             ConstantFolder::synthesizeLiteral(
+                                 m_Context.IntTy, m_Context, returnsAfter)));
+    return clad_compat::IfStmt_Create(
+        m_Context, noLoc, /*IsConstexpr=*/false, /*Init=*/nullptr,
+        /*Var=*/nullptr, cond, noLoc, noLoc, Step);
+  }
+
+  namespace {
+  /// What the early returns of a function ask of its reverse sweep.
+  struct EarlyReturnFacts {
+    /// How many there are.
+    unsigned Count = 0;
+    /// Those inside a loop that are followed by another statement of that
+    /// loop, in the order the statements of a block are visited.
+    llvm::SmallPtrSet<const ReturnStmt*, 4> FollowedInLoop;
+  };
+  } // namespace
+
+  static EarlyReturnFacts findEarlyReturnFacts(const DiffRequest& request) {
+    const FunctionDecl* Def =
+        request.Function ? request.Function->getDefinition() : nullptr;
+    if (!Def || !Def->hasBody())
+      return {};
+    struct Finder : RecursiveASTVisitor<Finder> {
+      const ReturnStmt* Tail = nullptr;
+      EarlyReturnFacts Facts;
+      // For each enclosing loop, the early returns seen in it since the last
+      // statement of one of its blocks was.
+      llvm::SmallVector<llvm::SmallVector<const ReturnStmt*, 2>, 4> Loops;
+      // A return in a nested lambda belongs to the lambda.
+      static bool TraverseLambdaExpr(LambdaExpr*) { return true; }
+      bool TraverseCompoundStmt(CompoundStmt* CS) {
+        for (Stmt* S : CS->body()) {
+          if (!isa<NullStmt>(S))
+            for (auto& Returns : Loops) {
+              Facts.FollowedInLoop.insert(Returns.begin(), Returns.end());
+              Returns.clear();
+            }
+          if (!TraverseStmt(S))
+            return false;
+        }
+        return true;
+      }
+      bool inLoop(llvm::function_ref<bool()> TraverseLoop) {
+        Loops.emplace_back();
+        bool Continue = TraverseLoop();
+        Loops.pop_back();
+        return Continue;
+      }
+      bool TraverseForStmt(ForStmt* S) {
+        return inLoop([&] { return RecursiveASTVisitor::TraverseForStmt(S); });
+      }
+      bool TraverseCXXForRangeStmt(CXXForRangeStmt* S) {
+        return inLoop(
+            [&] { return RecursiveASTVisitor::TraverseCXXForRangeStmt(S); });
+      }
+      bool TraverseWhileStmt(WhileStmt* S) {
+        return inLoop(
+            [&] { return RecursiveASTVisitor::TraverseWhileStmt(S); });
+      }
+      bool TraverseDoStmt(DoStmt* S) {
+        return inLoop([&] { return RecursiveASTVisitor::TraverseDoStmt(S); });
+      }
+      bool VisitReturnStmt(ReturnStmt* RS) {
+        if (RS == Tail)
+          return true;
+        ++Facts.Count;
+        for (auto& Returns : Loops)
+          Returns.push_back(RS);
+        return true;
+      }
+    } F;
+    F.Tail = request.getTailReturn();
+    F.TraverseStmt(Def->getBody());
+    return F.Facts;
+  }
+
+  VarDecl* ReverseModeVisitor::getEarlyReturnTaken() {
+    if (!m_EarlyReturnTaken)
+      m_EarlyReturnTaken =
+          GlobalStoreImpl(m_Context.IntTy, "_returned",
+                          ConstantFolder::synthesizeLiteral(
+                              m_Context.IntTy, m_Context, /*val=*/0));
+    return m_EarlyReturnTaken;
+  }
+
   StmtDiff ReverseModeVisitor::VisitReturnStmt(const ReturnStmt* RS) {
     // Initially, df/df = 1.
     if (m_DiffReq->getReturnType()->isVoidType())
@@ -1655,6 +1815,26 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     if (!Reverse)
       Reverse = m_Sema.ActOnNullStmt(noLoc).get();
 
+    // Inside a loop, a value the seed reads back is stored where it is
+    // computed, by a push written into the returned expression itself. That
+    // expression is not otherwise part of the derivative, which returns
+    // nothing, so evaluate the parts of it that push: the seed pops what they
+    // stored. (With an external source the expression is its to place.)
+    if (isInsideLoop() &&
+        (!m_ExternalSource || utils::IsCladValueAndPushforwardType(type))) {
+      auto evaluateIfItPushes = [this](Expr* E) {
+        // Not through addToCurrentBlock, which drops an expression whose
+        // value is unused.
+        if (E && containsTapePush(E))
+          getCurrentBlock(direction::forward).push_back(E);
+      };
+      if (auto* ILE = dyn_cast_or_null<InitListExpr>(ExprDiff.getExpr()))
+        for (Expr* Init : ILE->inits())
+          evaluateIfItPushes(Init);
+      else
+        evaluateIfItPushes(ExprDiff.getExpr());
+    }
+
     // A return inside a switch case terminates that case's fall-through group,
     // exactly like a break. Close the group so the reverse switch enters only
     // this case's adjoint; the entry label must precede the adjoint it guards.
@@ -1665,12 +1845,43 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     addToCurrentBlock(Reverse, direction::reverse);
 
     Stmt* marker = m_Sema.ActOnNullStmt(noLoc).get();
+
+    // The lambda runs the whole reverse sweep, so called from here it also
+    // passes over the code that follows this return, which the forward sweep
+    // never ran. The adjoints there are zero, but its values are placeholders
+    // -- a zero divisor turns a zero adjoint into a NaN -- and nothing was
+    // pushed for what it pops. VisitCompoundStmt therefore guards the reverse
+    // of every statement by the returns that precede it, on a variable saying
+    // which return is taken; the assignment is part of what replaces the
+    // marker, if any statement turns out to need it.
+    if (m_EarlyReturnMarkers.empty()) {
+      EarlyReturnFacts Facts = findEarlyReturnFacts(m_DiffReq);
+      m_NumEarlyReturns = Facts.Count;
+      m_EarlyReturnsFollowedInLoop = std::move(Facts.FollowedInLoop);
+    }
+    m_EarlyReturnIndex[marker] = m_EarlyReturnMarkers.size() + 1;
+    // Reaching the seed of the return ends the skipped stretch. That only
+    // matters inside a loop, where the sweep comes back to what it skipped:
+    // the iterations before the one that returned ran in full and are swept
+    // in full -- the statements after the return, and the step between two
+    // iterations.
+    bool sweptAgain = m_EarlyReturnsFollowedInLoop.count(RS);
+    for (LoopScope* Loop = m_CurrentLoop; Loop && !sweptAgain;
+         Loop = Loop->m_Enclosing)
+      sweptAgain = Loop->StepHasReverse;
+    if (sweptAgain)
+      addToCurrentBlock(
+          BuildOp(BO_Assign, BuildDeclRef(getEarlyReturnTaken()),
+                  ConstantFolder::synthesizeLiteral(m_Context.IntTy, m_Context,
+                                                    /*val=*/0)),
+          direction::reverse);
+
     m_EarlyReturnMarkers.insert(marker);
     return marker;
   }
 
   void ReverseModeVisitor::patchEarlyReturnMarkers(
-      llvm::function_ref<Stmt*()> MakeReplacement) {
+      llvm::function_ref<Stmt*(const Stmt*)> MakeReplacement) {
     // Replace each marker with a fresh structured `{ _rev(); return; }` so the
     // generated body is well-formed without goto. Each site gets its own node
     // (MakeReplacement builds one per hit); sharing a single replacement across
@@ -1680,14 +1891,14 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     class Patcher : public RecursiveASTVisitor<Patcher> {
     public:
       const llvm::SmallPtrSetImpl<Stmt*>* Markers;
-      llvm::function_ref<Stmt*()> Make;
+      llvm::function_ref<Stmt*(const Stmt*)> Make;
       Patcher(const llvm::SmallPtrSetImpl<Stmt*>* M,
-              llvm::function_ref<Stmt*()> Mk)
+              llvm::function_ref<Stmt*(const Stmt*)> Mk)
           : Markers(M), Make(Mk) {}
       bool VisitStmt(Stmt* S) {
         for (Stmt*& Child : S->children())
           if (Child && Markers->count(Child))
-            Child = Make();
+            Child = Make(Child);
         return true;
       }
     };
@@ -1695,7 +1906,7 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     Stmts& Block = getCurrentBlock(direction::forward);
     for (Stmt*& S : Block)
       if (m_EarlyReturnMarkers.count(S))
-        S = MakeReplacement();
+        S = MakeReplacement(S);
       else
         P.TraverseStmt(S);
   }
@@ -5391,6 +5602,7 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
       m_CurrentLoop->Checkpointed = true;
     }
     Expr* counterIncrement = loopCounter.getCounterIncrement();
+    unsigned returnsBeforeBody = m_EarlyReturnMarkers.size();
     auto* activeBreakContHandler = PushBreakContStmtHandler();
     activeBreakContHandler->BeginCFSwitchStmtScope();
     m_LoopBlock.emplace_back();
@@ -5457,6 +5669,9 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
             m_Context, noLoc, false, nullptr, nullptr, m_CurrentBreakFlagExpr,
             noLoc, noLoc, forLoopIncDiff, noLoc, nullptr);
       }
+      // Nor for the iteration an early return left.
+      forLoopIncDiffExpr =
+          SkipLoopStepAfterEarlyReturn(forLoopIncDiffExpr, returnsBeforeBody);
       if (bodyDiff.getStmt_dx()) {
         bodyDiff.updateStmtDx(utils::PrependAndCreateCompoundStmt(
             m_Context, bodyDiff.getStmt_dx(), forLoopIncDiffExpr));
