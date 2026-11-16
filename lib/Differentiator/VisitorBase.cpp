@@ -406,14 +406,80 @@ namespace clad {
     for (Stmt* S : Prefix)
       note(S);
 
+    // The locals and parameters that code left behind in the suffix may have
+    // written by the time control reaches a later declaration. A declaration
+    // moved in front of the lambda has its initializer evaluated ahead of all
+    // of that code, so it must not read any of them:
+    //
+    //   double c[2];                    double c[2] = {0};
+    //   c[0] = a * 1.2;                 const double r = 1. + c[0] * l; // 0!
+    //   const double r = 1. + c[0] * l; auto _rev0 = [&] { ... r ... };
+    //                                   c[0] = a * 1.2;
+    //
+    // Conservative: every reference that is not a plain read of the value
+    // counts as a write. That covers assignments and increments, an address
+    // taken or a reference bound (the variable can then change through the
+    // alias, so the initializers of the declarations before the lambda are
+    // scanned too), and an array or an lvalue handed to a call.
+    llvm::SmallPtrSet<const VarDecl*, 16> Written;
+    class WriteCollector : public RecursiveASTVisitor<WriteCollector> {
+      llvm::SmallPtrSetImpl<const VarDecl*>& m_Written;
+
+    public:
+      explicit WriteCollector(llvm::SmallPtrSetImpl<const VarDecl*>& W)
+          : m_Written(W) {}
+      bool TraverseImplicitCastExpr(ImplicitCastExpr* ICE) {
+        if (ICE->getCastKind() != CK_LValueToRValue)
+          return RecursiveASTVisitor::TraverseImplicitCastExpr(ICE);
+        // The value of a variable, or of an element or a member of it, is
+        // read. Skip the variable the access is rooted at and visit the rest,
+        // i.e. the subscripts.
+        Expr* E = ICE->getSubExpr();
+        for (;;) {
+          E = E->IgnoreParens();
+          if (auto* ASE = dyn_cast<ArraySubscriptExpr>(E)) {
+            auto* Base =
+                dyn_cast<ImplicitCastExpr>(ASE->getBase()->IgnoreParens());
+            // A pointer base is an expression like any other.
+            if (!Base || Base->getCastKind() != CK_ArrayToPointerDecay)
+              break;
+            if (!TraverseStmt(ASE->getIdx()))
+              return false;
+            E = Base->getSubExpr();
+          } else if (auto* ME = dyn_cast<MemberExpr>(E)) {
+            if (ME->isArrow() || !isa<FieldDecl>(ME->getMemberDecl()))
+              break;
+            E = ME->getBase();
+          } else
+            break;
+        }
+        if (isa<DeclRefExpr>(E))
+          return true;
+        return TraverseStmt(E);
+      }
+      bool VisitDeclRefExpr(DeclRefExpr* DRE) {
+        if (auto* VD = dyn_cast<VarDecl>(DRE->getDecl()))
+          if (VD->isLocalVarDecl() || isa<ParmVarDecl>(VD))
+            m_Written.insert(VD);
+        return true;
+      }
+    } Writes(Written);
+    auto noteWrites = [&](Stmt* S) {
+      if (S)
+        Writes.TraverseStmt(S);
+    };
+    for (Stmt* S : AlreadyLive)
+      noteWrites(S);
+    for (Stmt* S : Prefix)
+      noteWrites(S);
+
     // Moving a decl earlier preserves its value only if its initializer yields
     // the same value there: it may reference only names already live before
-    // the lambda. This checks availability, not that those names are unmutated
-    // in between; it is sound for the decls clad moves -- zero-initialized
-    // adjoints and entry-live seeds, whose operands the forward sweep has not
-    // yet reassigned. A decl reading a value the suffix computes fails the test
-    // and stays put (findUseBeforeDecl catches a captured local left behind).
-    auto selfContained = [&](const VarDecl* VD) {
+    // the lambda and, with \p CheckWrites, none that the code left behind may
+    // have written in between. A decl reading a value the suffix computes
+    // fails the test and stays put (findUseBeforeDecl catches a captured local
+    // left behind).
+    auto selfContained = [&](const VarDecl* VD, bool CheckWrites) {
       const Expr* Init = VD->getInit();
       if (!Init)
         return true;
@@ -421,11 +487,12 @@ namespace clad {
       class RefChecker : public RecursiveASTVisitor<RefChecker> {
       public:
         const llvm::SmallPtrSetImpl<const VarDecl*>* Available = nullptr;
+        const llvm::SmallPtrSetImpl<const VarDecl*>* Written = nullptr;
         bool* Ok = nullptr;
         bool VisitDeclRefExpr(DeclRefExpr* DRE) const {
           auto* RVD = dyn_cast<VarDecl>(DRE->getDecl());
           if (RVD && (RVD->isLocalVarDecl() || isa<ParmVarDecl>(RVD)) &&
-              !Available->count(RVD)) {
+              (!Available->count(RVD) || (Written && Written->count(RVD)))) {
             *Ok = false;
             return false;
           }
@@ -433,6 +500,7 @@ namespace clad {
         }
       } RC;
       RC.Available = &Available;
+      RC.Written = CheckWrites ? &Written : nullptr;
       RC.Ok = &Ok;
       // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
       RC.TraverseStmt(const_cast<Expr*>(Init));
@@ -447,6 +515,7 @@ namespace clad {
                            return VD && contains(VD);
                          });
       if (!AnyCaptured) {
+        noteWrites(S);
         Remaining.push_back(S);
         continue;
       }
@@ -469,12 +538,16 @@ namespace clad {
         if (KeptHere.empty())
           return;
         Remaining.push_back(m_V.BuildDeclStmt(KeptHere));
+        noteWrites(Remaining.back());
         KeptHere.clear();
       };
       for (Decl* D : DS->decls()) {
         auto* VD = dyn_cast<VarDecl>(D);
         bool Hoistable = VD && contains(VD);
-        if (Hoistable && selfContained(VD)) {
+        // An array cannot be split (see below), so it keeps moving on
+        // availability alone.
+        bool IsArray = VD && isa<ArrayType>(VD->getType());
+        if (Hoistable && selfContained(VD, /*CheckWrites=*/!IsArray)) {
           flushKept();
           // Moved wholesale, the decl may still carry no real initial value:
           // default init of a scalar or of a trivially-default-constructible
@@ -493,6 +566,7 @@ namespace clad {
               m_V.SetDeclInit(VD, Zero);
           Prefix.push_back(m_V.BuildDeclStmt(VD));
           note(Prefix.back());
+          noteWrites(Prefix.back());
           continue;
         }
         // Splitting needs a whole-object assignment, which an array type has
@@ -500,7 +574,7 @@ namespace clad {
         // ReverseModeVisitor::BuildArrayAssignment, out of this shared
         // VisitorBase utility's reach. Keep the decl -- findUseBeforeDecl
         // still reports it if it really was captured.
-        if (!Hoistable || isa<ArrayType>(VD->getType())) {
+        if (!Hoistable || IsArray) {
           KeptHere.push_back(D);
           continue;
         }
@@ -535,6 +609,7 @@ namespace clad {
         // `_t0 = y` snapshot of a split `y`) must go through this same split
         // path rather than treat the placeholder as the real value.
         Remaining.push_back(m_V.BuildOp(BO_Assign, DeclRef, Init));
+        noteWrites(Remaining.back());
       }
       flushKept();
     }
