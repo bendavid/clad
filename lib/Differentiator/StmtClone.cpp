@@ -235,7 +235,13 @@ DEFINE_CLONE_EXPR(GNUNullExpr,
 DEFINE_CLONE_EXPR(VAArgExpr,
                   (Node->getBuiltinLoc(), Clone(Node->getSubExpr()),
                    Node->getWrittenTypeInfo(), Node->getRParenLoc(),
-                   CloneType(Node->getType()), Node->isMicrosoftABI()))
+                   CloneType(Node->getType()),
+#if CLANG_VERSION_MAJOR < 23
+                   Node->isMicrosoftABI()
+#else
+                   Node->getVarargABI()
+#endif
+                   ))
 DEFINE_CLONE_EXPR(ImplicitValueInitExpr, (CloneType(Node->getType())))
 DEFINE_CLONE_EXPR(CXXScalarValueInitExpr,
                   (CloneType(Node->getType()), Node->getTypeSourceInfo(),
@@ -259,13 +265,20 @@ DEFINE_CLONE_EXPR(SubstNonTypeTemplateParmExpr,
                    Node->getBeginLoc(), Node->getReplacement(),
                    Node->getAssociatedDecl(), Node->getIndex(),
                    Node->getPackIndex(), Node->isReferenceParameter()))
-#else
+#elif CLANG_VERSION_MAJOR < 23
 DEFINE_CLONE_EXPR(SubstNonTypeTemplateParmExpr,
                   (CloneType(Node->getType()), Node->getValueKind(),
                    Node->getBeginLoc(), Node->getReplacement(),
                    Node->getAssociatedDecl(), Node->getIndex(),
                    Node->getPackIndex(), Node->isReferenceParameter(),
                    Node->getFinal()))
+#else
+DEFINE_CLONE_EXPR(SubstNonTypeTemplateParmExpr,
+                  (CloneType(Node->getType()), Node->getValueKind(),
+                   Node->getBeginLoc(), Clone(Node->getReplacement()),
+                   Node->getAssociatedDecl(),
+                   CloneType(Node->getParameterType()), Node->getIndex(),
+                   Node->getPackIndex(), Node->getFinal()))
 #endif
 DEFINE_CREATE_EXPR(PseudoObjectExpr, (Ctx, Node->getSyntacticForm(), llvm::SmallVector<Expr*, 4>(Node->semantics_begin(), Node->semantics_end()), Node->getResultExprIndex()))
 // NOLINTEND(modernize-use-auto)
