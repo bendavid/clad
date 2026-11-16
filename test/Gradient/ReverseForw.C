@@ -35,7 +35,7 @@ double* nested(double* p, int n) {
 //CHECK: void nested_pullback(double *p, int n, double *_d_p, int *_d_n) {
 //CHECK-NEXT:     bool _cond0;
 //CHECK-NEXT:     int _d_i = 0;
-//CHECK-NEXT:     int i;
+//CHECK-NEXT:     int i = 0;
 //CHECK-NEXT:     {
 //CHECK-NEXT:         _cond0 = n > 0;
 //CHECK-NEXT:         if (_cond0)

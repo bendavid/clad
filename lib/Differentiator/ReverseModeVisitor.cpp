@@ -4308,14 +4308,28 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
       VDCloneTSI = m_Context.getTrivialTypeSourceInfo(VDCloneType, noLoc);
     }
 
-    VDClone = BuildGlobalVarDecl(VDCloneType, VD->getNameAsString(),
-                                 initDiff.getExpr(), VD->isDirectInit(),
-                                 VDCloneTSI, SC);
-
-    // The choice of isDirectInit is mostly stylistic.
     bool isRealConstArray = false;
     if (const auto* arrType = dyn_cast<ConstantArrayType>(VDType))
       isRealConstArray = arrType->getElementType()->isRealType();
+
+    Expr* cloneInit = initDiff.getExpr();
+    // If the original declaration has no initializer, zero-initialize the
+    // clone when it is cheap to do so: the reverse sweep may store the
+    // pre-assignment values of this variable (tapes, restore trackers), and
+    // those stores would otherwise read indeterminate memory -- undefined
+    // behavior that optimizers are entitled to propagate into the adjoints
+    // (observed as silently zeroed gradients at -O1 and above). Not with an
+    // external source attached: error estimation assigns an error to every
+    // initializer it finds on the clone.
+    if (!cloneInit && !VD->getInit() && !isRefType && !isPointerType &&
+        !m_ExternalSource &&
+        (VDCloneType->isArithmeticType() || isRealConstArray))
+      cloneInit = getZeroInit(VDCloneType);
+
+    VDClone = BuildGlobalVarDecl(VDCloneType, VD->getNameAsString(), cloneInit,
+                                 VD->isDirectInit(), VDCloneTSI, SC);
+
+    // The choice of isDirectInit is mostly stylistic.
     bool isDirectInit = VD->isDirectInit() && (!RD || isNonAggrClass);
     if (VDDerivedType->isBuiltinType() || !VD->getInit() || isRealConstArray) {
       initDiff.updateStmtDx(getZeroInit(VDType));

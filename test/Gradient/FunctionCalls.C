@@ -571,7 +571,7 @@ double fn13(double* x, const double* w) {
 // CHECK-NEXT:     std::size_t _d_i = {{0U|0UL}};
 // CHECK-NEXT:     std::size_t i = {{0U|0UL}};
 // CHECK-NEXT:     double _d_wCopy[2] = {0};
-// CHECK-NEXT:     double wCopy[2];
+// CHECK-NEXT:     double wCopy[2] = {0};
 // CHECK-NEXT:     unsigned {{int|long|long long}} _t0;
 // CHECK-NEXT:     for (i = 0; i < 2; ++i) {
 // CHECK-NEXT:         wCopy[i] = w[i];

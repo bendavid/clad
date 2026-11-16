@@ -51,7 +51,7 @@ double f2(double x){
 //CHECK-NEXT:     double _d_b = 0.;
 //CHECK-NEXT:     double b = 1;
 //CHECK-NEXT:     double _d_g = 0.;
-//CHECK-NEXT:     double g;
+//CHECK-NEXT:     double g = 0.;
 //CHECK-NEXT:     {
 //CHECK-NEXT:         _cond0 = a;
 //CHECK-NEXT:         if (_cond0) {
@@ -325,7 +325,7 @@ double f10(double x){
 // CHECK-NEXT: void f10_grad(double x, double *_d_x) {
 // CHECK-NEXT:     clad::tape<double> _rec0 = {};
 // CHECK-NEXT:     double _d_t[3] = {0};
-// CHECK-NEXT:     double t[3];
+// CHECK-NEXT:     double t[3] = {0};
 // CHECK-NEXT:     clad::record_range(_rec0, t, 1UL);
 // CHECK-NEXT:     f10_1(x, t);
 // CHECK-NEXT:     _d_t[0] += 1;
@@ -363,7 +363,7 @@ double f11(double x){
 // CHECK-NEXT: }
 // CHECK-NEXT: void f11_grad(double x, double *_d_x) {
 // CHECK-NEXT:     double _d_y = 0.;
-// CHECK-NEXT:     double y;
+// CHECK-NEXT:     double y = 0.;
 // CHECK-NEXT:     double _t0 = y;
 // CHECK-NEXT:     double _d_c = 0.;
 // CHECK-NEXT:     double c = f11_1(x, y);

@@ -100,7 +100,7 @@ void fn3(const double *x, int n, double *y) {
 
 // CHECK:  void fn3_grad(const double *x, int n, double *y, double *_d_x, int *_d_n, double *_d_y) {
 // CHECK-NEXT:      int _d_i = 0;
-// CHECK-NEXT:      int i;
+// CHECK-NEXT:      int i = 0;
 // CHECK-NEXT:      #pragma omp parallel
 // CHECK-NEXT:          {
 // CHECK-NEXT:              int _t_chunklo0 = 0;

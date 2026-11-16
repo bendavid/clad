@@ -29,7 +29,10 @@ double refilled(double seed) {
   return sum;
 }
 
+// The first iteration records what the array held before anything was
+// written to it, so its clone is not left uninitialized.
 // CHECK: void refilled_grad(double seed, double *_d_seed) {
+// CHECK: double arr[3] = {0};
 // CHECK: clad::push(_t1, arr[0]);
 // CHECK-NEXT: arr[0] = seed;
 // CHECK: sum_squares_pullback(arr, 3,

@@ -504,7 +504,7 @@ double fn9(double i, double j) {
 // CHECK: void fn9_grad(double i, double j, double *_d_i, double *_d_j) {
 // CHECK-NEXT:     clad::tape<unsigned {{int|long|long long}}> _t1 = {};
 // CHECK-NEXT:     int _d_counter = 0, _d_counter_again = 0;
-// CHECK-NEXT:     int counter, counter_again;
+// CHECK-NEXT:     int counter = 0, counter_again = 0;
 // CHECK-NEXT:     counter = counter_again = 3;
 // CHECK-NEXT:     double _d_a = 0.;
 // CHECK-NEXT:     double a = 0;

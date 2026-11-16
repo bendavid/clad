@@ -490,7 +490,7 @@ double func11(double seed) {
 // CHECK-NEXT:    int _d_i = 0;
 // CHECK-NEXT:    int i = 0;
 // CHECK-NEXT:    double _d_arr[3] = {0};
-// CHECK-NEXT:    double arr[3];
+// CHECK-NEXT:    double arr[3] = {0};
 // CHECK-NEXT:    clad::tape<double> _t1 = {};
 // CHECK-NEXT:    clad::tape<double> _t2 = {};
 // CHECK-NEXT:    clad::tape<double> _t3 = {};

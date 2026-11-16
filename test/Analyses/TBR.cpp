@@ -148,7 +148,7 @@ double f4(double x, double y) {
 
 //CHECK: void f4_grad(double x, double y, double *_d_x, double *_d_y) {
 //CHECK-NEXT:     double _d_arr[4] = {0};
-//CHECK-NEXT:     double arr[4];
+//CHECK-NEXT:     double arr[4] = {0};
 //CHECK-NEXT:     double _d_res = 0.;
 //CHECK-NEXT:     double res = y;
 //CHECK-NEXT:     arr[0] = x;
@@ -222,7 +222,7 @@ double f6(double x, double y) {
 
 //CHECK: void f6_grad(double x, double y, double *_d_x, double *_d_y) {
 //CHECK-NEXT:     double _d_arr[4] = {0};
-//CHECK-NEXT:     double arr[4];
+//CHECK-NEXT:     double arr[4] = {0};
 //CHECK-NEXT:     arr[0] = y;
 //CHECK-NEXT:     double _t0 = x;
 //CHECK-NEXT:     x *= arr[0];

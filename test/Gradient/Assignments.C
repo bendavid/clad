@@ -434,7 +434,7 @@ double f12(double x, double y) {
 //CHECK-NEXT:       double _t0;
 //CHECK-NEXT:       double _t1;
 //CHECK-NEXT:       double _d_t = 0.;
-//CHECK-NEXT:       double t;
+//CHECK-NEXT:       double t = 0.;
 //CHECK-NEXT:       bool _cond0 = x > y;
 //CHECK-NEXT:       if (_cond0)
 //CHECK-NEXT:           _t0 = t;
